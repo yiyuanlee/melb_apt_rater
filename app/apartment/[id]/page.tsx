@@ -1,20 +1,36 @@
-import { supabase } from '@/lib/supabase';
+import { createClient } from '@supabase/supabase-js'; // 直接引入 createClient
 import ReviewForm from '@/components/ReviewForm';
 import Image from 'next/image';
 import { notFound } from 'next/navigation';
 
+// 强制动态渲染，确保每次访问都获取最新评分
 export const dynamic = 'force-dynamic';
 
-// Next.js 15+ 这里的 params 需要 await，或者作为 Promise 类型处理
 type Props = {
   params: Promise<{ id: string }>
 }
 
 export default async function ApartmentDetail({ params }: Props) {
-  // 等待 params 解析 (Next.js 15 新特性)
   const { id } = await params;
 
-  // 1. 获取公寓详情 + 评论列表
+  // 1. 创建一个强制不缓存的 Supabase 客户端
+  // (和首页保持一致，解决 Vercel 上数据不刷新的问题)
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      global: {
+        fetch: (url, options) => {
+          return fetch(url, {
+            ...options,
+            cache: 'no-store',
+          });
+        },
+      },
+    }
+  );
+
+  // 2. 并行获取：公寓详情 + 评论列表
   const [aptResult, reviewsResult] = await Promise.all([
     supabase.from('apartments').select('*').eq('id', id).single(),
     supabase.from('reviews').select('*').eq('apartment_id', id).order('upvotes', { ascending: false })
@@ -23,10 +39,21 @@ export default async function ApartmentDetail({ params }: Props) {
   const apartment = aptResult.data;
   const reviews = reviewsResult.data || [];
 
+  // 如果找不到公寓，返回 404
   if (!apartment) return notFound();
 
-  // 根据分数决定颜色
-  const scoreColor = apartment.rating_avg >= 9.0 ? 'text-[#c01d2e]' : 'text-black';
+  // --- 3. 图片路径智能修复逻辑 ---
+  const defaultImage = 'https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=800&q=80';
+  
+  // 优先用数据库的图，没有则用默认图
+  let displayImage = apartment.cover_image || defaultImage;
+
+  // 防御性编程：如果是本地图片(不含http)且忘了加斜杠，自动补上
+  // 例如：数据库存 "aurora.jpg" -> 自动改为 "/aurora.jpg"
+  if (displayImage && !displayImage.startsWith('http') && !displayImage.startsWith('/')) {
+    displayImage = `/${displayImage}`;
+  }
+  // ------------------------------
 
   return (
     <div className="min-h-screen bg-[#f7f7f8] pb-20">
@@ -34,10 +61,12 @@ export default async function ApartmentDetail({ params }: Props) {
       {/* 顶部大图区 */}
       <div className="relative h-64 md:h-80 w-full bg-gray-900">
         <Image 
-          src={apartment.cover_image || 'https://images.unsplash.com/photo-1545324418-cc1a3fa10c00'} 
+          src={displayImage} // 👈 使用修复后的路径
           alt={apartment.name} 
           fill 
-          className="object-cover opacity-70" 
+          className="object-cover opacity-70"
+          // 添加 priority 属性，让大图优先加载，LCP 体验更好
+          priority
         />
         <div className="absolute bottom-0 left-0 w-full p-6 bg-gradient-to-t from-black/80 to-transparent">
           <div className="max-w-3xl mx-auto flex items-end justify-between text-white">
@@ -48,6 +77,7 @@ export default async function ApartmentDetail({ params }: Props) {
               <p className="opacity-90">{apartment.location} · {apartment.tags?.join(' / ')}</p>
             </div>
             <div className="text-right">
+              {/* 根据分数变色 */}
               <div className={`text-6xl font-black italic leading-none ${apartment.rating_avg >= 9 ? 'text-[#ff4d4f]' : 'text-white'}`}>
                 {apartment.rating_avg}
               </div>
